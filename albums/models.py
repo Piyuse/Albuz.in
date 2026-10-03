@@ -17,4 +17,35 @@ class Album(models.Model):
     def __str__(self):
         return self.title
     
+class PhotoAsset(models.Model):
+    id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
+    file=models.FileField(upload_to='photo/')
+    filename=models.CharField(max_length=255)
+    content_type=models.CharField(max_length=100)
+    size=models.PositiveIntegerField()
+    width=models.PositiveIntegerField()
+    height=models.PositiveIntegerField()
+    
+    created_at=models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return self.filename
+    
+class AlbumPhoto(models.Model):
+    id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
+    album=models.ForeignKey(Album,on_delete=models.CASCADE,related_name='photos')
+    asset=models.ForeignKey(PhotoAsset,on_delete=models.PROTECT,related_name='placements')
+    caption=models.CharField(max_length=255,blank=True)
+    position=models.PositiveIntegerField(default=0)
+    created_at=models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['position','id']
+        constraints = [
+            models.UniqueConstraint(fields=['album','asset'],name='unique_album_asset')
+        ]
+    
+    def __str__(self):
+        return f"{self.album.title} - {self.asset.filename}"
+    
     
