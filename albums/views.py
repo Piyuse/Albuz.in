@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
-from .serializers import AlbumSerializer, PhotoUploadSerializer
+from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer
 from .models import Album, PhotoAsset, AlbumPhoto
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -11,6 +11,9 @@ from django.db import transaction
 import logging
 from rest_framework.response import Response
 from django.db.models import Max
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import JSONParser
+from rest_framework.exceptions import ValidationError
 # Create your views here.
 logger = logging.getLogger(__name__)
 
@@ -93,3 +96,72 @@ class PhotoUploadView(APIView):
             "position": position,
             "created_at": entry.created_at
         }, status=201)
+
+class AlbumPhotoPagination(PageNumberPagination):
+    page_size = 50
+
+
+class AlbumPhotoListView(generics.ListAPIView):
+    serializer_class = AlbumPhotoSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = AlbumPhotoPagination
+    
+    def get_queryset(self):
+        album = get_object_or_404(Album, pk=self.kwargs['album_id'], owner=self.request.user)
+        return (
+            AlbumPhoto.objects.filter(album=album,asset__isnull=False)
+            .select_related('asset')
+            .order_by('position', 'id')
+        )
+        
+class PhotoCopyView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes =[JSONParser]
+    
+    def post(self, request, album_id):
+        serializer=PhotoCopySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        source_id = serializer.validated_data['source_album_id']
+        photo_ids = serializer.validated_data['photo_ids']
+        
+        if source_id == album_id:
+            return Response({"detail": "Source and destination albums cannot be the same."}, status=400)
+
+        
+        with transaction.atomic():
+            destination=get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user)
+            source=get_object_or_404(Album.objects.select_for_update(), pk=source_id, owner=request.user)
+            selected=AlbumPhoto.objects.filter(album=source, id__in=photo_ids).select_related('asset')
+            if len(selected) != len(photo_ids):
+                raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the source album."]})
+            
+            existing_assests=set(destination.photos.values_list('asset_id', flat=True))
+            last=destination.photos.aggregate(last=Max('position'))['last']
+            position=(0 if last is None else last+1)
+            
+            copied_ids=[]
+            skipped=0
+            
+            
+            for photo in selected:
+                if photo.asset_id in existing_assests:
+                    skipped+=1
+                    continue
+                
+                copy=AlbumPhoto.objects.create(
+                    album=destination,
+                    asset_id=photo.asset_id,
+                    caption=photo.caption,
+                    position=position
+                )
+                
+                copied_ids.append(str(copy.pk))
+                existing_assests.add(photo.asset_id)
+                position+=1
+                
+            return Response({
+                "copied": len(copied_ids),
+                "skipped": skipped,
+                "photo_ids": copied_ids
+            }, status=201  if copied_ids else 200)
