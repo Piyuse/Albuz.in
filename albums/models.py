@@ -19,7 +19,7 @@ class Album(models.Model):
     
 class PhotoAsset(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
-    file=models.FileField(upload_to='photo/')
+    file=models.FileField(upload_to='photos/')
     filename=models.CharField(max_length=255)
     content_type=models.CharField(max_length=100)
     size=models.PositiveIntegerField()
