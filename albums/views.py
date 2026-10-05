@@ -371,3 +371,15 @@ class SharedPhotoCopyView(generics.ListAPIView):
                 "skipped": skipped,
                 "photo_ids": copied_ids
             }, status=201  if copied_ids else 200)
+            
+            
+class AlbumDetailView(generics.RetrieveUpdateAPIView):
+    serializer_class=AlbumSerializer
+    permission_classes=[IsAuthenticated]
+    parser_classes=[JSONParser]
+    
+    lookup_url_kwarg='album_id'
+    http_method_names=['get','patch','head','options']
+    
+    def get_queryset(self):
+        return Album.objects.filter(owner=self.request.user)
