@@ -74,3 +74,7 @@ class BulkPhotoUploadSerializer(serializers.Serializer):
             item["photo"]
             for item in validator.validated_data
         ]
+        
+class ShareCreateSerializer(serializers.Serializer):
+    can_copy = serializers.BooleanField(default=False)
+    expires_in_hours = serializers.IntegerField(min_value=1, max_value=720, default=168)

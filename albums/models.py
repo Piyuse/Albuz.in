@@ -48,4 +48,12 @@ class AlbumPhoto(models.Model):
     def __str__(self):
         return f"{self.album.title} - {self.asset.filename}"
     
-    
+
+class AlbumShare(models.Model):
+    id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
+    album=models.ForeignKey(Album,on_delete=models.CASCADE,related_name='shares')
+    token_hash=models.CharField(max_length=64,unique=True)
+    can_copy=models.BooleanField(default=False)
+    expires_at=models.DateTimeField()
+    revoked_at=models.DateTimeField(null=True,blank=True)
+    created_at=models.DateTimeField(auto_now_add=True)

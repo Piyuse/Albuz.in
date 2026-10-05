@@ -1,8 +1,8 @@
 from django.shortcuts import render
 from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated
-from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer
-from .models import Album, PhotoAsset, AlbumPhoto
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,ShareCreateSerializer
+from .models import Album, PhotoAsset, AlbumPhoto,AlbumShare
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
@@ -14,6 +14,9 @@ from django.db.models import Max
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import JSONParser
 from rest_framework.exceptions import ValidationError
+import secrets
+from django.utils import timezone
+from django.urls import reverse
 # Create your views here.
 logger = logging.getLogger(__name__)
 
@@ -188,7 +191,6 @@ class BulkPhotoUploadView(APIView):
         
 
         uploaded_files = []
-        results=[]
         skipped_photos = 0
         total_size = sum(photo.size for photo in photos)
 
@@ -240,3 +242,65 @@ class BulkPhotoUploadView(APIView):
             "skipped": skipped_photos,
             "photo_ids": uploaded_files
         }, status=201 if uploaded_files else 200)
+        
+class ShareCreateView(APIView):
+    permission_classes =[IsAuthenticated]
+    parser_classes=[JSONParser]
+    
+    def post(self, request, album_id):
+        album=get_object_or_404(Album, pk=album_id, owner=request.user)
+        serializer=ShareCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token=secrets.token_urlsafe(32)
+        share=AlbumShare.objects.create(
+            album=album,
+            token_hash=token,
+            can_copy=serializer.validated_data['can_copy'],
+            expires_at=timezone.now() + timezone.timedelta(hours=serializer.validated_data['expires_in_hours'])
+        )
+        url=request.build_absolute_uri(reverse('shared-album-photos', kwargs={'token': token}))
+        response=Response({
+            "id": str(share.pk),
+            "url": url,
+            "can_copy": share.can_copy,
+            "expires_at": share.expires_at,
+        },status=201)
+        
+        response["Cache-Control"]="no-store"
+        return response
+    
+class SharedAlbumPhotoListView(generics.ListAPIView):
+    authentication_classes=[]
+    permission_classes=[AllowAny]
+    serializer_class=AlbumPhotoSerializer
+    pagination_class=AlbumPhotoPagination
+     
+    def get_queryset(self):
+        self.share=get_object_or_404(AlbumShare.objects.select_related('album'), token_hash=self.kwargs['token'], revoked_at__isnull=True, expires_at__gt=timezone.now())
+        return (
+            AlbumPhoto.objects.filter(album=self.share.album, asset__isnull=False)
+            .select_related('asset')
+            .order_by('position', 'id')
+        )
+    def list(self,request,*args,**kwargs):
+        response=super().list(request,*args,**kwargs)
+        
+        response.data["album"]= {
+            "id":str(self.share.album_id),
+            "title":self.share.album.title
+        }
+        response.data["can-copy"] =self.share.can_copy
+        response["Cache-Control"]="no=store"
+        
+        return response
+    
+class ShareRevokeView(APIView):
+    permission_classes=[IsAuthenticated]
+    
+    def delete(self,request,album_id,share_id):
+        share=get_object_or_404(AlbumShare,pk=share_id,album_id=album_id,album__owner=request.user)
+        if share.revoked_at is None:
+            share.revoked_at=timezone.now()
+            share.save(update_fields=["revoked_at"])
+            
+        return Response(status=204)
