@@ -1,8 +1,9 @@
 from django.shortcuts import render
 from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,ShareCreateSerializer
+
 from .models import Album, PhotoAsset, AlbumPhoto,AlbumShare
+from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
@@ -13,12 +14,16 @@ from rest_framework.response import Response
 from django.db.models import Max
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import JSONParser
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 import secrets
 from django.utils import timezone
 from django.urls import reverse
+import hashlib
 # Create your views here.
 logger = logging.getLogger(__name__)
+
+def hash_share_token(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 class AlbumListCreateView(generics.ListCreateAPIView):
     serializer_class = AlbumSerializer
@@ -304,3 +309,65 @@ class ShareRevokeView(APIView):
             share.save(update_fields=["revoked_at"])
             
         return Response(status=204)
+    
+class SharedPhotoCopyView(generics.ListAPIView):
+    permission_classes=[AllowAny]
+    parser_classes=[JSONParser]
+    
+    def post(self,request,token):
+        serializer=SharedPhotoCopySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        destination_id=serializer.validated_data['destination_album_id']
+        photo_ids=serializer.validated_data['photo_ids']
+        
+        with transaction.atomic():
+            share=get_object_or_404(AlbumShare.objects.select_for_update(),token_hash=hash_share_token(token),revoked_at__isnull=True,expires_at__gt=timezone.now())
+            
+            if not share.can_copy:
+                raise PermissionDenied("This share does not allow copying.")
+            
+            destination=get_object_or_404(Album.objects.select_for_update(),pk=destination_id,owner=request.user)
+            
+            if share.expires_at<timezone.now():
+                raise PermissionDenied("This share has expired.")
+            
+            if share.album_id==destination_id:
+                raise PermissionDenied("Source and destination albums cannot be the same.")
+            
+            selected=AlbumPhoto.objects.filter(album_id=share.album,pk__in=photo_ids,asset__isnull=False).order_by('position','id')
+            
+            if len(selected)!=len(photo_ids):
+                raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the source album."]})
+            
+            asset_ids = {photo.asset_id for photo in selected}
+            
+            existing_assets=set(destination.photos.filter(asset_id__in=asset_ids).values_list('asset_id', flat=True))
+             
+            last=destination.photos.aggregate(last=Max('position'))['last']
+            
+            position=(0 if last is None else last+1)
+            copied_ids=[]
+            skipped=0
+            for photo in selected:
+                if photo.asset_id in existing_assets:
+                    skipped+=1
+                    continue
+                
+                copy=AlbumPhoto.objects.create(
+                    album=destination,
+                    asset_id=photo.asset_id,
+                    caption=photo.caption,
+                    position=position
+                )
+                
+                copied_ids.append(str(copy.pk))
+                existing_assets.add(photo.asset_id)
+                position+=1
+                
+            return Response({
+                "destination_album_id": str(destination_id),
+                "copied": len(copied_ids),
+                "skipped": skipped,
+                "photo_ids": copied_ids
+            }, status=201  if copied_ids else 200)
