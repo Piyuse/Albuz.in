@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
-from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer
+from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer
 from .models import Album, PhotoAsset, AlbumPhoto
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -165,3 +165,78 @@ class PhotoCopyView(APIView):
                 "skipped": skipped,
                 "photo_ids": copied_ids
             }, status=201  if copied_ids else 200)
+            
+class BulkPhotoUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, album_id):
+        get_object_or_404(Album, pk=album_id, owner=request.user)
+        serializer = BulkPhotoUploadSerializer(data={
+            'photos': request.FILES.getlist('photos'),
+            'caption': request.data.get('caption', '')
+        })
+        serializer.is_valid(raise_exception=True)
+
+        photos = serializer.validated_data['photos']
+        caption = serializer.validated_data['caption']
+        formats = {
+                                "JPEG": ("jpg", "image/jpeg"),
+                                "PNG": ("png", "image/png"),
+                                "WEBP": ("webp", "image/webp"),
+                            }
+        
+
+        uploaded_files = []
+        results=[]
+        skipped_photos = 0
+        total_size = sum(photo.size for photo in photos)
+
+        if total_size > 100 * 1024 * 1024:
+            return Response({"detail": "Total size of all photos exceeds the maximum limit of 100MB."}, status=400)
+
+        with transaction.atomic():
+            album = get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user)
+            last_position = album.photos.aggregate(last=Max('position'))['last']
+            position = (0 if last_position is None else last_position + 1)
+
+            for photo in photos:
+                try:
+                    width, height = photo.image.size
+                   
+
+                    extension, content_type = formats[photo.image.format]
+                    asset = PhotoAsset(
+                        filename=photo.name,
+                        content_type=content_type,
+                        size=photo.size,
+                        width=width,
+                        height=height
+                    )
+
+                    photo.seek(0)
+                    asset.file.save(
+                        f"{uuid.uuid4().hex}.{extension}",
+                        photo,
+                        save=False,
+                    )
+                    asset.save()
+
+                    AlbumPhoto.objects.create(
+                        album=album,
+                        asset=asset,
+                        caption=caption,
+                        position=position
+                    )
+                    uploaded_files.append(str(asset.id))
+                    position += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to upload photo {photo.name}: {str(e)}")
+                    skipped_photos += 1
+
+        return Response({
+            "uploaded": len(uploaded_files),
+            "skipped": skipped_photos,
+            "photo_ids": uploaded_files
+        }, status=201 if uploaded_files else 200)

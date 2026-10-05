@@ -1,3 +1,5 @@
+from wsgiref.validate import validator
+
 from rest_framework import serializers
 from .models import Album,AlbumPhoto
 
@@ -52,3 +54,23 @@ class PhotoCopySerializer(serializers.Serializer):
         if len(photo_ids) != len(set(photo_ids)):
             raise serializers.ValidationError("Duplicate photo IDs are not allowed.")
         return photo_ids
+    
+class BulkPhotoUploadSerializer(serializers.Serializer):
+    photos = serializers.ListField(child=serializers.FileField(), allow_empty=False, max_length=100,write_only=True)
+    caption= serializers.CharField(max_length=500, default="", allow_blank=True)
+    
+    def validate_photos(self, photos):
+        total_size = sum(photo.size for photo in photos)
+        if total_size > 100 * 1024 * 1024:
+            raise serializers.ValidationError("Total size of all photos exceeds the maximum limit of 100MB.")
+        
+        validator = PhotoUploadSerializer(
+            data=[{'photo': photo} for photo in photos],
+            many=True
+        )
+        
+        validator.is_valid(raise_exception=True)
+        return [
+            item["photo"]
+            for item in validator.validated_data
+        ]
