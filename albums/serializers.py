@@ -89,3 +89,8 @@ class SharedPhotoCopySerializer(serializers.Serializer):
             raise serializers.ValidationError("Duplicate photo IDs are not allowed.")
         return photo_ids
 
+class AlbumPhotoEditSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AlbumPhoto
+        fields = ['id', 'caption' ]
+        read_only_fields = ['id']

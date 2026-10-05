@@ -3,7 +3,7 @@ from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from .models import Album, PhotoAsset, AlbumPhoto,AlbumShare
-from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer
+from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer,AlbumPhotoEditSerializer
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
@@ -383,3 +383,17 @@ class AlbumDetailView(generics.RetrieveUpdateAPIView):
     
     def get_queryset(self):
         return Album.objects.filter(owner=self.request.user)
+    
+class AlbumPhotoDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class=AlbumPhotoEditSerializer
+    permission_classes=[IsAuthenticated]
+    parser_classes=[JSONParser]
+    
+    
+    lookup_url_kwarg='photo_id'
+    http_method_names=['get','patch','head','options','delete']
+    def get_queryset(self):
+        return AlbumPhoto.objects.filter(
+            album_id=self.kwargs['album_id'],
+            album__owner=self.request.user
+        )
