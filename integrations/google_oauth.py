@@ -3,7 +3,7 @@ from django.core.exceptions import ImproperlyConfigured
 from google_auth_oauthlib.flow import Flow
 
 
-def build_google_flow(state=None):
+def build_google_flow(state=None, code_verifier=None):
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
         raise ImproperlyConfigured(
             "Configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env."
@@ -24,4 +24,6 @@ def build_google_flow(state=None):
         scopes=settings.GOOGLE_DRIVE_SCOPES,
         state=state,
         redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        code_verifier=code_verifier,
+        autogenerate_code_verifier=False,
     )
