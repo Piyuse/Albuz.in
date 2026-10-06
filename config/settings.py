@@ -19,6 +19,22 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
 
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "http://127.0.0.1:8000/api/integrations/google/callback/",
+)
+
+GOOGLE_DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+GOOGLE_TOKEN_ENCRYPTION_KEY = os.getenv(
+    "GOOGLE_TOKEN_ENCRYPTION_KEY",
+    "",
+)
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
@@ -42,7 +58,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     "accounts",
-    "albums"
+    "albums",
+    "integrations",
 ]
 
 STORAGES = {
