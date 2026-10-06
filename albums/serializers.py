@@ -94,3 +94,11 @@ class AlbumPhotoEditSerializer(serializers.ModelSerializer):
         model = AlbumPhoto
         fields = ['id', 'caption' ]
         read_only_fields = ['id']
+        
+class PhotoReorderSerializer(serializers.Serializer):
+    photo_ids = serializers.ListField(child=serializers.UUIDField(), allow_empty=False,max_length=100 )
+    
+    def validate_photo_ids(self, photo_ids):
+        if len(photo_ids) != len(set(photo_ids)):
+            raise serializers.ValidationError("Duplicate photo IDs are not allowed.")
+        return photo_ids

@@ -1,4 +1,4 @@
-from .views import AlbumListCreateView, PhotoUploadView, AlbumPhotoListView, PhotoCopyView,BulkPhotoUploadView,ShareCreateView,ShareRevokeView,SharedAlbumPhotoListView,SharedPhotoCopyView,AlbumDetailView,AlbumPhotoDetailView
+from .views import AlbumListCreateView, PhotoReorderView,PhotoUploadView, AlbumPhotoListView, PhotoCopyView,BulkPhotoUploadView,ShareCreateView,ShareRevokeView,SharedAlbumPhotoListView,SharedPhotoCopyView,AlbumDetailView,AlbumPhotoDetailView
 from django.urls import path
 
 urlpatterns = [
@@ -13,4 +13,5 @@ urlpatterns = [
     path("shared/<str:token>/photos/copy/",SharedPhotoCopyView.as_view(),name="shared-photo-copy"),
     path("<uuid:album_id>/",AlbumDetailView.as_view(),name="album-detail",)  ,
     path("<uuid:album_id>/photos/<uuid:photo_id>/",AlbumPhotoDetailView.as_view(),name="album-photo-detail",),
+    path("<uuid:album_id>/photos/reorder/",PhotoReorderView.as_view(),name="photo-reorder",),
 ]

@@ -3,7 +3,7 @@ from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from .models import Album, PhotoAsset, AlbumPhoto,AlbumShare
-from .serializers import AlbumSerializer, PhotoUploadSerializer, AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer,AlbumPhotoEditSerializer
+from .serializers import AlbumSerializer, PhotoUploadSerializer,PhotoReorderSerializer,AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer,AlbumPhotoEditSerializer
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
@@ -397,3 +397,48 @@ class AlbumPhotoDetailView(generics.RetrieveUpdateDestroyAPIView):
             album_id=self.kwargs['album_id'],
             album__owner=self.request.user
         )
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+                get_object_or_404(
+                Album.objects.select_for_update(),
+                pk=instance.album_id,
+                owner=self.request.user,
+            )
+
+        AlbumPhoto.objects.filter(
+                pk=instance.pk,
+                album_id=instance.album_id,
+            ).delete()
+        
+class PhotoReorderView(APIView):
+    permission_classes=[IsAuthenticated]
+    parser_classes=[JSONParser]
+    
+    def post(self,request,album_id):
+        serializer=PhotoReorderSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        photo_ids=serializer.validated_data['photo_ids']
+        
+        with transaction.atomic():
+            album = get_object_or_404(Album, pk=album_id, owner=request.user)
+            photos_by_id = {photo.pk: photo for photo in album.photos.filter(asset__isnull=False).only('id','position')}
+            
+            if(set(photo_ids)!=set(photos_by_id)):
+                raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the album."]})
+            ordered_photos=[]
+            
+            for position,photo_id in enumerate(photo_ids):
+                photo=photos_by_id[photo_id]
+                photo.position=position
+                ordered_photos.append(photo)
+                
+            AlbumPhoto.objects.bulk_update(ordered_photos, ['position'], batch_size=100)
+
+            return Response(
+                {
+                    "album_id": str(album.pk),
+                    "updated": len(ordered_photos),
+                    "photo_ids": [str(photo_id) for photo_id in photo_ids],
+                }
+            )
