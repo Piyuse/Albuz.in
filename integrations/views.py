@@ -7,20 +7,27 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+import httplib2
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from integrations.google_drive import apply_resource_key, get_drive_service
+from integrations.serializers import DriveFolderListSerializer
 
 from .crypto import encrypt_json
 from .google_oauth import build_google_flow
 from .models import GoogleDriveConnection, GoogleOAuthState
 from django.shortcuts import get_object_or_404
 
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from .crypto import decrypt_json, encrypt_json
 
 from oauthlib.oauth2 import OAuth2Error
 from requests.exceptions import RequestException
+
+from google.auth.exceptions import RefreshError, TransportError
+from googleapiclient.errors import HttpError
 
 GOOGLE_OAUTH_COOKIE = "google_oauth_browser"
 GOOGLE_OAUTH_TTL_SECONDS = 600
@@ -167,3 +174,118 @@ class GoogleCallbackView(APIView):
             )
 
         return response
+    
+class GoogleDriveFolderListView(APIView):
+    permission_classes=[IsAuthenticated]
+    
+    def get(self,request):
+        serializer=DriveFolderListSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        
+        folder=serializer.validated_data['folder_link']
+        page_token=serializer.validated_data['page_token']
+        service=None
+        
+        try:
+            service=get_drive_service(request.user)
+            folder_request=service.files().get(
+                fileId=folder['folder_id'],
+                fields="id,name,mimeType,driveId",
+                supportsAllDrives=True,
+            )
+            metadata=apply_resource_key(folder_request,folder).execute()
+            if metadata['mimeType']!=('application/vnd.google-apps.folder'):
+                raise ValidationError({"detail": "The provided folder link is not a folder."})
+            
+            query=(
+                f"'{folder['folder_id']}' in parents "
+                "and trashed = false "
+                "and (mimeType = 'image/jpeg' "
+                "or mimeType = 'image/png' "
+                "or mimeType = 'image/webp')"
+            )
+            
+            list_options = {
+                "q": query,
+                "pageSize": 50,
+                "pageToken": page_token or None,
+                "orderBy": "name_natural",
+                "supportsAllDrives": True,
+                "includeItemsFromAllDrives": True,
+                "fields": (
+                    "nextPageToken,"
+                    "files(id,name,mimeType,size,resourceKey,"
+                    "capabilities(canDownload))"
+                ),
+                "corpora": "user",
+            }
+            if metadata.get("driveId"):
+                list_options["corpora"] = "drive"
+                list_options["driveId"] = metadata["driveId"]
+
+            list_request = service.files().list(**list_options)
+
+            result = apply_resource_key(
+                list_request, folder
+            ).execute()
+
+            response = Response({
+                "folder": {
+                    "id": metadata["id"],
+                    "name": metadata["name"],
+                },
+                "files": result.get("files", []),
+                "next_page_token": result.get("nextPageToken"),
+            })
+            response["Cache-Control"] = "no-store"
+            return response
+
+        except RefreshError:
+            raise ValidationError({
+                "detail": "Reconnect your Google Drive account."
+            })
+
+        except HttpError as exc:
+            google_status = int(exc.resp.status)
+
+            if google_status == 400:
+                raise ValidationError({
+                    "detail": (
+                        "Google rejected the request. Check the folder "
+                        "link or retry without a page token."
+                    )
+                })
+
+            if google_status == 401:
+                raise ValidationError({
+                    "detail": "Reconnect your Google Drive account."
+                })
+
+            if google_status == 403:
+                raise PermissionDenied(
+                    "Google denied the request. Check folder access, "
+                    "Drive API configuration, and API quota."
+                )
+
+            if google_status == 404:
+                raise NotFound(
+                    "Folder not found or unavailable to "
+                    "your connected Google account."
+                )
+
+            return Response(
+                {"detail": "Google Drive is temporarily unavailable."},
+                status=502,
+            )
+
+        except (TransportError, httplib2.HttpLib2Error, OSError):
+            return Response(
+                {"detail": "Could not connect to Google Drive. Try again."},
+                status=502,
+            )
+
+        finally:
+            if service is not None:
+                service.close()
+            
+        
