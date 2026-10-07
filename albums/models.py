@@ -57,3 +57,13 @@ class AlbumShare(models.Model):
     expires_at=models.DateTimeField()
     revoked_at=models.DateTimeField(null=True,blank=True)
     created_at=models.DateTimeField(auto_now_add=True)
+    
+class PendingPhotoDeletion(models.Model):
+    file_name = models.CharField(
+        max_length=512,
+        unique=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]

@@ -373,16 +373,34 @@ class SharedPhotoCopyView(generics.ListAPIView):
             }, status=201  if copied_ids else 200)
             
             
-class AlbumDetailView(generics.RetrieveUpdateAPIView):
-    serializer_class=AlbumSerializer
-    permission_classes=[IsAuthenticated]
-    parser_classes=[JSONParser]
-    
-    lookup_url_kwarg='album_id'
-    http_method_names=['get','patch','head','options']
-    
+class AlbumDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = AlbumSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    lookup_url_kwarg = "album_id"
+
+    http_method_names = [
+        "get",
+        "patch",
+        "delete",
+        "head",
+        "options",
+    ]
+
     def get_queryset(self):
-        return Album.objects.filter(owner=self.request.user)
+        return Album.objects.filter(
+            owner=self.request.user,
+        )
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            album = get_object_or_404(
+                self.get_queryset().select_for_update(),
+                pk=instance.pk,
+            )
+
+            album.delete()
     
 class AlbumPhotoDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class=AlbumPhotoEditSerializer
