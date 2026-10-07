@@ -1,5 +1,6 @@
 from .views import AlbumListCreateView, PhotoReorderView,PhotoUploadView, AlbumPhotoListView, PhotoCopyView,BulkPhotoUploadView,ShareCreateView,ShareRevokeView,SharedAlbumPhotoListView,SharedPhotoCopyView,AlbumDetailView,AlbumPhotoDetailView
 from django.urls import path
+from .drive_views import DrivePhotoImportView
 
 urlpatterns = [
     path("",AlbumListCreateView.as_view(),name="album-list-create"),
@@ -14,4 +15,6 @@ urlpatterns = [
     path("<uuid:album_id>/",AlbumDetailView.as_view(),name="album-detail",)  ,
     path("<uuid:album_id>/photos/<uuid:photo_id>/",AlbumPhotoDetailView.as_view(),name="album-photo-detail",),
     path("<uuid:album_id>/photos/reorder/",PhotoReorderView.as_view(),name="photo-reorder",),
+    path("<uuid:album_id>/photos/import-drive/",DrivePhotoImportView.as_view(),name="drive-photo-import",
+),
 ]

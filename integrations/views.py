@@ -88,73 +88,138 @@ class GoogleConnectStartView(APIView):
         return response
     
 class GoogleCallbackView(APIView):
-    authentication_classes=[]
-    permission_classes=[AllowAny]
-    
-    def get(self,request):
-        state=request.query_params.get('state',"")
-        browser_nonce=request.COOKIES.get(GOOGLE_OAUTH_COOKIE,"")
-        
-        if not state or not browser_nonce:
-            raise ValidationError({"detail": "Start a new google connection in the same browser."})
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
-        
+    def get(self, request):
+        state = request.query_params.get("state", "")
+        browser_nonce = request.COOKIES.get(
+            "google_oauth_browser", ""
+        )
+
+        if not state or not browser_nonce:
+            raise ValidationError({
+                "detail": (
+                    "Start the Google connection again "
+                    "in the same browser."
+                )
+            })
+
+        # Validate and consume the OAuth attempt.
         with transaction.atomic():
-            attempt=get_object_or_404(GoogleOAuthState.objects.select_for_update(),state_hash=hash_oauth_value(state),user=request.user,used_at__isnull=True,expires_at__gt=timezone.now())
-            
+            attempt = get_object_or_404(
+                GoogleOAuthState.objects.select_for_update(),
+                state_hash=hash_oauth_value(state),
+                used_at__isnull=True,
+                expires_at__gt=timezone.now(),
+            )
+
             if attempt.expires_at <= timezone.now():
                 raise ValidationError({
-                    "detail":"The connection request has expired."
+                    "detail": "This connection attempt expired."
                 })
-            if not secrets.compare_digest(attempt.browser_nonce_hash,hash_oauth_value(browser_nonce)):
-                raise PermissionDenied("Invalid browser nonce.")
-            
-            attempt.used_at=timezone.now()
+
+            if not secrets.compare_digest(
+                attempt.browser_nonce_hash,
+                hash_oauth_value(browser_nonce),
+            ):
+                raise PermissionDenied(
+                    "The Google connection browser does not match."
+                )
+
+            attempt.used_at = timezone.now()
             attempt.save(update_fields=["used_at"])
-            
-            user_id=attempt.user_id
-            verifier_encrypted=attempt.code_verifier_encrypted
-            
-        self.clear_oauth_cookie=True
-        code=request.query_params.get('code')
-        
-        if request.query_params.get('error') or not code:
-            raise ValidationError({"detail": "Google autherisation was not completed"})
-        
-        verifier_data=decrypt_json(verifier_encrypted)
-        
-        flow=build_google_flow(
+
+            # These variables are defined inside get().
+            user_id = attempt.user_id
+            verifier_encrypted = attempt.code_verifier_encrypted
+
+        self.clear_oauth_cookie = True
+
+        code = request.query_params.get("code")
+
+        if request.query_params.get("error") or not code:
+            raise ValidationError({
+                "detail": (
+                    "Google authorization was not completed. "
+                    "Start a new connection."
+                )
+            })
+
+        verifier_data = decrypt_json(verifier_encrypted)
+
+        flow = build_google_flow(
             state=state,
-            code_verifier=verifier_data['code_verifier']
+            code_verifier=verifier_data["code_verifier"],
         )
-        
+
         try:
-            flow.fetch_token(code=code,timeout=60)
-            credentials=flow.credentials
-        except(OAuth2Error,RequestException,ValueError,Warning):
-            return Response({"detail": "Google autherisation was not completed"},status=502)
-        
-        
-        granted_scopes=(
-            credentials.granted_scopes
-            if credentials.granted_scopes is not None
-            else credentials.scopes
-        )
-        
-        if not set(settings.GOOGLE_DRIVE_SCOPES).issubset(set(granted_scopes or [])):
-            raise PermissionDenied({"detail": "Google Drive read permission was not granted."})
-        
+            flow.fetch_token(code=code, timeout=20)
+            credentials = flow.credentials
+
+        except (OAuth2Error, RequestException, ValueError, Warning):
+            return Response(
+                {
+                    "detail": (
+                        "Google authorization could not be completed. "
+                        "Check your OAuth configuration and start again."
+                    )
+                },
+                status=502,
+            )
+
+        granted_scopes = credentials.granted_scopes
+
+        if granted_scopes is None:
+            granted_scopes = credentials.scopes
+
+        if not set(settings.GOOGLE_DRIVE_SCOPES).issubset(
+            set(granted_scopes or [])
+        ):
+            raise PermissionDenied(
+                "The required Google Drive permission was not granted."
+            )
+
         if not credentials.refresh_token:
-            raise ValidationError({"detail": "Google did not return a refresh token."})
-        
+            raise ValidationError({
+                "detail": (
+                    "Google did not provide a refresh token. "
+                    "Start a new connection and approve access again."
+                )
+            })
+
+        # Define this before using it in update_or_create().
         credentials_data = json.loads(credentials.to_json())
 
-        GoogleDriveConnection.objects.update_or_create(
-            user_id=user_id,
-            defaults={
-                "credentials_encrypted": encrypt_json(credentials_data),
-            },
-        )
+        # Check that disconnecting did not cancel this attempt.
+        with transaction.atomic():
+            active_attempt = (
+                GoogleOAuthState.objects
+                .select_for_update()
+                .filter(
+                    state_hash=hash_oauth_value(state),
+                    user_id=user_id,
+                    used_at__isnull=False,
+                )
+                .first()
+            )
+
+            if active_attempt is None:
+                raise ValidationError({
+                    "detail": (
+                        "This Google connection attempt was cancelled. "
+                        "Start a new connection."
+                    )
+                })
+
+            GoogleDriveConnection.objects.update_or_create(
+                user_id=user_id,
+                defaults={
+                    "credentials_encrypted": encrypt_json(
+                        credentials_data
+                    ),
+                },
+            )
 
         return Response({"connected": True})
 
@@ -168,7 +233,7 @@ class GoogleCallbackView(APIView):
 
         if getattr(self, "clear_oauth_cookie", False):
             response.delete_cookie(
-                GOOGLE_OAUTH_COOKIE,
+                "google_oauth_browser",
                 path="/api/integrations/google/",
                 samesite="Lax",
             )
@@ -288,4 +353,8 @@ class GoogleDriveFolderListView(APIView):
             if service is not None:
                 service.close()
             
+            
+
+            
+
         

@@ -1,7 +1,11 @@
+import io
 from wsgiref.validate import validator
 
 from rest_framework import serializers
+
+from .constants import MAX_PHOTO_BYTES
 from .models import Album,AlbumPhoto
+
 
 class AlbumSerializer(serializers.ModelSerializer):
     class Meta:
@@ -30,6 +34,7 @@ class PhotoUploadSerializer(serializers.Serializer):
         
         return photo
     
+
 class AlbumPhotoSerializer(serializers.ModelSerializer):
     filename = serializers.CharField(source='asset.filename', read_only=True)
     width = serializers.IntegerField(source='asset.width', read_only=True)

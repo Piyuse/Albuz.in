@@ -1,7 +1,7 @@
 from django.urls import path
 
-from .views import GoogleCallbackView, GoogleConnectStartView,DriveFolderPhotoListView
-
+from .views import GoogleCallbackView, GoogleConnectStartView,GoogleDriveFolderListView
+from .connection_views import GoogleConnectionView
 
 urlpatterns = [
     
@@ -17,7 +17,12 @@ urlpatterns = [
     ),
      path(
     "google/folder-photos/",
-    DriveFolderPhotoListView.as_view(),
+    GoogleDriveFolderListView.as_view(),
     name="google-folder-photos",
+),
+     path(
+    "google/connection/",
+    GoogleConnectionView.as_view(),
+    name="google-connection",
 ),
 ]
