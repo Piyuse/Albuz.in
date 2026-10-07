@@ -273,30 +273,52 @@ class ShareCreateView(APIView):
         
         response["Cache-Control"]="no-store"
         return response
-    
+class SharedAlbumPagination(PageNumberPagination):
+    page_size = 50
+  
 class SharedAlbumPhotoListView(generics.ListAPIView):
-    authentication_classes=[]
-    permission_classes=[AllowAny]
-    serializer_class=AlbumPhotoSerializer
-    pagination_class=AlbumPhotoPagination
-     
+    serializer_class = AlbumPhotoSerializer
+    pagination_class = SharedAlbumPagination
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
     def get_queryset(self):
-        self.share=get_object_or_404(AlbumShare.objects.select_related('album'), token_hash=self.kwargs['token'], revoked_at__isnull=True, expires_at__gt=timezone.now())
-        return (
-            AlbumPhoto.objects.filter(album=self.share.album, asset__isnull=False)
-            .select_related('asset')
-            .order_by('position', 'id')
+        token = self.kwargs["token"]
+
+        token_hash = hashlib.sha256(
+            token.encode("utf-8")
+        ).hexdigest()
+
+        self.share = get_object_or_404(
+            AlbumShare.objects.select_related("album"),
+            token_hash=token_hash,
+            revoked_at__isnull=True,
+            expires_at__gt=timezone.now(),
         )
-    def list(self,request,*args,**kwargs):
-        response=super().list(request,*args,**kwargs)
-        
-        response.data["album"]= {
-            "id":str(self.share.album_id),
-            "title":self.share.album.title
+
+        return (
+            AlbumPhoto.objects
+            .filter(
+                album_id=self.share.album_id,
+                asset__isnull=False,
+            )
+            .select_related("asset")
+            .order_by("position", "id")
+        )
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+
+        response.data["album"] = {
+            "id": str(self.share.album_id),
+            "title": self.share.album.title,
         }
-        response.data["can-copy"] =self.share.can_copy
-        response["Cache-Control"]="no=store"
-        
+        response.data["can_copy"] = self.share.can_copy
+
+        response["Cache-Control"] = "no-store"
+        response["Referrer-Policy"] = "no-referrer"
+
         return response
     
 class ShareRevokeView(APIView):

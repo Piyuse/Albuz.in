@@ -85,13 +85,23 @@ class ShareCreateSerializer(serializers.Serializer):
     expires_in_hours = serializers.IntegerField(min_value=1, max_value=720, default=168)
     
 class SharedPhotoCopySerializer(serializers.Serializer):
-    destination_album_id=serializers.UUIDField  
-    
-    photo_ids = serializers.ListField(child=serializers.UUIDField(), allow_empty=False,max_length=100 )
-    
+    destination_album_id = serializers.UUIDField(
+        required=True,
+    )
+
+    photo_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        min_length=1,
+        max_length=100,
+        required=True,
+    )
+
     def validate_photo_ids(self, photo_ids):
         if len(photo_ids) != len(set(photo_ids)):
-            raise serializers.ValidationError("Duplicate photo IDs are not allowed.")
+            raise serializers.ValidationError(
+                "Duplicate photo IDs are not allowed."
+            )
+
         return photo_ids
 
 class AlbumPhotoEditSerializer(serializers.ModelSerializer):
