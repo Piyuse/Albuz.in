@@ -30,7 +30,38 @@ from .models import Album, AlbumPhoto, PhotoAsset
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_BYTES = 50 * 1024 * 1024
+
+def matches_stored_photo(photo, asset):
+    """Compare a downloaded photo with a legacy album asset without loading either in RAM."""
+    photo.seek(0)
+    try:
+        with asset.file.open("rb") as stored:
+            while True:
+                downloaded_chunk = photo.read(1024 * 1024)
+                stored_chunk = stored.read(1024 * 1024)
+                if downloaded_chunk != stored_chunk:
+                    return False
+                if not downloaded_chunk:
+                    return True
+    finally:
+        photo.seek(0)
+
+
+def restore_drive_photos(album, file_ids, next_position):
+    """Re-add previously removed Drive placements without downloading them again."""
+    restored_ids = []
+    skipped = 0
+    for placement in AlbumPhoto.objects.filter(album=album, source_drive_file_id__in=file_ids):
+        if not placement.is_deleted:
+            skipped += 1
+            continue
+        placement.is_deleted = False
+        placement.deleted_at = None
+        placement.position = next_position
+        placement.save(update_fields=['is_deleted', 'deleted_at', 'position'])
+        restored_ids.append(str(placement.pk))
+        next_position += 1
+    return restored_ids, skipped, next_position
 
 
 @method_decorator(transaction.non_atomic_requests, name="dispatch")
@@ -45,91 +76,121 @@ class DrivePhotoImportView(APIView):
         data = serializer.validated_data
 
         # Reject requests for someone else's album before downloading.
-        get_object_or_404(
+        album = get_object_or_404(
             Album,
             pk=album_id,
             owner=request.user,
+            is_deleted=False,
         )
+
+        requested_ids = [photo["file_id"] for photo in data["photos"]]
+        existing_ids = set(
+            AlbumPhoto.objects.filter(
+                album=album,
+                is_deleted=False,
+                source_drive_file_id__in=requested_ids,
+            ).values_list("source_drive_file_id", flat=True)
+        )
+        skipped = len(existing_ids)
+        deleted_ids = set(AlbumPhoto.objects.filter(
+            album=album, is_deleted=True, source_drive_file_id__in=requested_ids,
+        ).values_list('source_drive_file_id', flat=True))
+        pending = [photo for photo in data["photos"] if photo["file_id"] not in existing_ids | deleted_ids]
+        if not pending:
+            restored_ids = []
+            if deleted_ids:
+                with transaction.atomic(durable=True):
+                    album = get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user, is_deleted=False)
+                    last = album.photos.filter(is_deleted=False).aggregate(last=Max('position'))['last']
+                    restored_ids, newly_skipped, _ = restore_drive_photos(album, deleted_ids, 0 if last is None else last + 1)
+                    skipped += newly_skipped
+            return Response({
+                "album_id": str(album_id),
+                "imported": len(restored_ids),
+                "skipped": skipped,
+                "photo_ids": restored_ids,
+            }, status=201 if restored_ids else 200)
 
         service = None
         prepared_photos = []
         uploaded_files = []
+        redundant_files = []
         imported_ids = []
         committed = False
 
         try:
             service = get_drive_service(request.user)
-            total_bytes = 0
-
-            # Phase 1: Download and validate every selected photo.
-            for selection in data["photos"]:
+            # Process one photo at a time so an import never holds every
+            # selected download in temporary storage at once.
+            for selection in pending:
                 downloaded = download_drive_photo(
                     service=service,
                     folder=data["folder_link"],
                     file_id=selection["file_id"],
                     resource_key=selection["resource_key"],
                 )
+                photo = downloaded["photo"]
+                try:
+                    legacy_photos = AlbumPhoto.objects.filter(
+                        album=album,
+                        is_deleted=False,
+                        source_drive_file_id__isnull=True,
+                        asset__size=photo.size,
+                    ).select_related("asset")
+                    legacy_match = next(
+                        (placement for placement in legacy_photos if matches_stored_photo(photo, placement.asset)),
+                        None,
+                    )
+                    if legacy_match is not None:
+                        with transaction.atomic():
+                            Album.objects.select_for_update().get(pk=album.pk, is_deleted=False)
+                            already_recorded = AlbumPhoto.objects.filter(
+                                album=album,
+                                source_drive_file_id=selection["file_id"],
+                            ).exists()
+                            linked = 0 if already_recorded else AlbumPhoto.objects.filter(
+                                pk=legacy_match.pk,
+                                source_drive_file_id__isnull=True,
+                            ).update(source_drive_file_id=selection["file_id"])
+                        if already_recorded or linked:
+                            skipped += 1
+                            continue
 
-                downloaded["caption"] = selection["caption"]
-                prepared_photos.append(downloaded)
+                    asset = PhotoAsset(
+                        filename=downloaded["filename"],
+                        content_type=photo.content_type,
+                        size=photo.size,
+                        width=downloaded["width"],
+                        height=downloaded["height"],
+                    )
 
-                total_bytes += downloaded["photo"].size
+                    extension = IMAGE_EXTENSIONS[photo.content_type]
+                    file_field = PhotoAsset._meta.get_field("file")
+                    storage = file_field.storage
+                    object_name = file_field.generate_filename(
+                        asset,
+                        f"{asset.id.hex}{extension}",
+                    )
 
-                if total_bytes > MAX_BATCH_BYTES:
-                    raise ValidationError({
-                        "photos": (
-                            "The selected photos exceed "
-                            "the 50 MB batch limit."
-                        )
-                    })
+                    uploaded_files.append((storage, object_name))
+                    photo.seek(0)
+                    saved_name = storage.save(object_name, photo)
+                    uploaded_files[-1] = (storage, saved_name)
+                    asset.file.name = saved_name
+                    prepared_photos.append((asset, selection["caption"], selection["file_id"]))
+                finally:
+                    photo.close()
 
-            # Phase 2: Upload validated files to the configured storage.
-            assets = []
-
-            for item in prepared_photos:
-                photo = item["photo"]
-
-                asset = PhotoAsset(
-                    filename=item["filename"],
-                    content_type=photo.content_type,
-                    size=photo.size,
-                    width=item["width"],
-                    height=item["height"],
-                )
-
-                extension = IMAGE_EXTENSIONS[photo.content_type]
-
-                # Use the PhotoAsset FileField's storage and upload path.
-                file_field = PhotoAsset._meta.get_field("file")
-                storage = file_field.storage
-
-                object_name = file_field.generate_filename(
-                    asset,
-                    f"{asset.id.hex}{extension}",
-                )
-
-                # Track the intended key before starting the upload.
-                uploaded_files.append((storage, object_name))
-
-                photo.seek(0)
-                saved_name = storage.save(object_name, photo)
-
-                # Storage can adjust the filename if necessary.
-                uploaded_files[-1] = (storage, saved_name)
-
-                # The file is already uploaded; assign its stored key.
-                asset.file.name = saved_name
-                assets.append(asset)
-
-            # Phase 3: Save all database records together.
+            # Save all album records together after the files are stored.
             with transaction.atomic(durable=True):
                 album = get_object_or_404(
                     Album.objects.select_for_update(),
                     pk=album_id,
                     owner=request.user,
+                    is_deleted=False,
                 )
 
-                last_position = album.photos.aggregate(
+                last_position = album.photos.filter(is_deleted=False).aggregate(
                     last=Max("position")
                 )["last"]
 
@@ -139,13 +200,30 @@ class DrivePhotoImportView(APIView):
                     else 0
                 )
 
-                for asset, item in zip(assets, prepared_photos):
+                restored_ids, newly_skipped, next_position = restore_drive_photos(album, deleted_ids, next_position)
+                imported_ids.extend(restored_ids)
+                skipped += newly_skipped
+
+                existing_ids = set(
+                    AlbumPhoto.objects.filter(
+                        album=album,
+                        source_drive_file_id__in=[item[2] for item in prepared_photos],
+                    ).values_list("source_drive_file_id", flat=True)
+                )
+
+                for asset, caption, source_file_id in prepared_photos:
+                    if source_file_id in existing_ids:
+                        skipped += 1
+                        redundant_files.append((asset.file.storage, asset.file.name))
+                        continue
+
                     asset.save(force_insert=True)
 
                     album_photo = AlbumPhoto.objects.create(
                         album=album,
                         asset=asset,
-                        caption=item["caption"],
+                        source_drive_file_id=source_file_id,
+                        caption=caption,
                         position=next_position,
                     )
 
@@ -205,18 +283,15 @@ class DrivePhotoImportView(APIView):
 
         finally:
             # A database rollback cannot undo an S3 upload.
-            if not committed:
-                for storage, object_name in uploaded_files:
-                    try:
-                        storage.delete(object_name)
-                    except Exception:
-                        logger.exception(
-                            "Could not clean up imported object: %s",
-                            object_name,
-                        )
-
-            for item in prepared_photos:
-                item["photo"].close()
+            cleanup_files = redundant_files if committed else uploaded_files
+            for storage, object_name in cleanup_files:
+                try:
+                    storage.delete(object_name)
+                except Exception:
+                    logger.exception(
+                        "Could not clean up imported object: %s",
+                        object_name,
+                    )
 
             if service is not None:
                 try:
@@ -230,7 +305,8 @@ class DrivePhotoImportView(APIView):
             {
                 "album_id": str(album_id),
                 "imported": len(imported_ids),
+                "skipped": skipped,
                 "photo_ids": imported_ids,
             },
-            status=201,
+            status=201 if imported_ids else 200,
         )

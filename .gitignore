@@ -1,7 +1,11 @@
 .venv/
 .env
+.env.*
+!.env.example
+.vercel/
 __pycache__/
 *.pyc
 db.sqlite3
+*.smoke.sqlite3
 private-media/
 staticfiles/

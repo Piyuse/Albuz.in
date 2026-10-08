@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 class DriveFolderListSerializer(serializers.Serializer):
     folder_link=serializers.URLField(max_length=2000)
     page_token=serializers.CharField(required=False,allow_blank=True,max_length=2000)
+    album_id=serializers.UUIDField(required=False)
     
     def validate_folder_link(self,value):
         url=urlsplit(value)
@@ -49,7 +50,7 @@ class DrivePhotoSelectionSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         default="",
-        max_length=500,
+        max_length=255,
     )
 
 
