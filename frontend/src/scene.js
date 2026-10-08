@@ -95,10 +95,10 @@ export function createMemoryRoom(container, albums, options) {
   box(13.35, .22, .16, 0, .09, -.88, ivory);
   box(13.35, .17, .35, 0, 7.7, -1, ivory);
 
-  // Shared photograph loading is local; no network request is needed at runtime.
+  // Covers may come from private object storage on another origin.
   const photos = new Map();
   const imageLoads = [...new Set(albums.map(a => a.photo))].map(path => new Promise(resolve => {
-    const image = new Image(); image.onload = () => { photos.set(path, image); resolve(); }; image.onerror = resolve; image.src = path;
+    const image = new Image(); image.crossOrigin = 'anonymous'; image.onload = () => { photos.set(path, image); resolve(); }; image.onerror = resolve; image.src = path;
   }));
   const loader = new THREE.TextureLoader();
   let sea;

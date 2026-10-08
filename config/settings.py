@@ -103,6 +103,8 @@ if os.getenv('S3_BUCKET'):
             'querystring_expire': 3600,
         },
     }
+    if os.getenv('S3_ENDPOINT_URL'):
+        STORAGES['default']['OPTIONS']['endpoint_url'] = os.environ['S3_ENDPOINT_URL']
 MEDIA_ROOT = BASE_DIR / 'private-media'
 MEDIA_URL = '/media/'
 REST_FRAMEWORK = {
@@ -175,6 +177,9 @@ DATABASES = {
         'NAME': os.getenv('SQLITE_DB_PATH', BASE_DIR / 'db.sqlite3'),
     })
 }
+if os.getenv('DB_NAME') and os.getenv('DB_SSL_CA'):
+    DATABASES['default']['OPTIONS']['ssl'] = {'ca': os.environ['DB_SSL_CA']}
+    DATABASES['default']['OPTIONS']['ssl_mode'] = 'VERIFY_IDENTITY'
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
