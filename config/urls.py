@@ -17,8 +17,19 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from django.urls import include, path
+from django.conf import settings
+from django.http import FileResponse, HttpResponse
+
+def frontend(request):
+    built = settings.BASE_DIR / 'frontend' / 'dist' / 'index.html'
+    if not built.exists():
+        return HttpResponse('Build the frontend with npm run build, or open the Vite development server on port 5173.', status=503)
+    response = FileResponse(built.open('rb'), content_type='text/html; charset=utf-8')
+    response['Cache-Control'] = 'no-cache'
+    return response
 
 urlpatterns = [
+    path('', frontend, name='frontend'),
     path('admin/', admin.site.urls),
     path('api/auth/', include('accounts.urls')),
     path('api/albums/', include('albums.urls')),

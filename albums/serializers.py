@@ -1,36 +1,54 @@
 import io
+import re
 from wsgiref.validate import validator
 
 from rest_framework import serializers
 
-from .constants import MAX_PHOTO_BYTES
+from .constants import MAX_BULK_UPLOAD_BYTES, MAX_PHOTO_BYTES, MAX_PHOTO_MIB, MAX_PHOTO_PIXELS, PHOTO_FORMATS
 from .models import Album,AlbumPhoto
+from .media import photo_url
 
 
 class AlbumSerializer(serializers.ModelSerializer):
+    cover_url = serializers.SerializerMethodField()
+    photo_count = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Album
-        fields = ['id', 'owner', 'title', 'description', 'created_at']
-        read_only_fields = ['id', 'owner', 'created_at']
+        fields = ['id', 'owner', 'title', 'description', 'category', 'color', 'created_at', 'cover_url', 'photo_count']
+        read_only_fields = ['id', 'owner', 'created_at', 'cover_url', 'photo_count']
+
+    def validate_color(self, value):
+        if not re.fullmatch(r'#[0-9a-fA-F]{6}', value):
+            raise serializers.ValidationError('Use a six-digit hex color.')
+        return value
+
+    def get_cover_url(self, obj):
+        active_photos = getattr(obj, 'active_photos', None)
+        if active_photos is not None:
+            first = active_photos[0] if active_photos else None
+        else:
+            first = obj.photos.filter(is_deleted=False).select_related('asset').first()
+        return photo_url(first.asset, self.context.get('request')) if first else None
         
 class PhotoUploadSerializer(serializers.Serializer):
     photo = serializers.ImageField(write_only=True)
     
-    caption = serializers.CharField(max_length=500, default="", allow_blank=True)
+    caption = serializers.CharField(max_length=255, default="", allow_blank=True)
     
     def validate_photo(self,photo):
-        max_size=10*1024*1024
+        if photo.size > MAX_PHOTO_BYTES:
+            raise serializers.ValidationError(f"Photo size exceeds the maximum limit of {MAX_PHOTO_MIB} MB.")
         
-        if photo.size>max_size:
-            raise serializers.ValidationError("Photo size exceeds the maximum limit of 10MB.")
-        
-        allowed_formats={'JPEG','PNG','GIF','WEBP'}
-        if photo.image.format not in allowed_formats:
-            raise serializers.ValidationError(f"Unsupported photo format. Allowed formats: {', '.join(allowed_formats)}.")
+        if photo.image.format not in PHOTO_FORMATS:
+            raise serializers.ValidationError(
+                f"Unsupported photo format ({photo.image.format or 'unknown'}). "
+                "Supported photos are JPG, PNG, and WebP."
+            )
         
         width, height = photo.image.size
-        if width*height>20_000_000:
-            raise serializers.ValidationError("Photo dimensions exceed the maximum limit of 20 million pixels.")    
+        if width * height > MAX_PHOTO_PIXELS:
+            raise serializers.ValidationError("Photo dimensions exceed the maximum limit of 80 million pixels.")
         
         return photo
     
@@ -47,9 +65,7 @@ class AlbumPhotoSerializer(serializers.ModelSerializer):
         read_only_fields = fields
         
     def get_url(self, obj):
-        if not obj.asset.file:
-            return None
-        return obj.asset.file.url
+        return photo_url(obj.asset, self.context.get('request'))
     
 class PhotoCopySerializer(serializers.Serializer):
     source_album_id = serializers.UUIDField()
@@ -62,12 +78,12 @@ class PhotoCopySerializer(serializers.Serializer):
     
 class BulkPhotoUploadSerializer(serializers.Serializer):
     photos = serializers.ListField(child=serializers.FileField(), allow_empty=False, max_length=100,write_only=True)
-    caption= serializers.CharField(max_length=500, default="", allow_blank=True)
+    caption= serializers.CharField(max_length=255, default="", allow_blank=True)
     
     def validate_photos(self, photos):
         total_size = sum(photo.size for photo in photos)
-        if total_size > 100 * 1024 * 1024:
-            raise serializers.ValidationError("Total size of all photos exceeds the maximum limit of 100MB.")
+        if total_size > MAX_BULK_UPLOAD_BYTES:
+            raise serializers.ValidationError("Total size of all photos exceeds the 3 GB batch limit.")
         
         validator = PhotoUploadSerializer(
             data=[{'photo': photo} for photo in photos],

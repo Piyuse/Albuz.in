@@ -1,0 +1,28 @@
+const collection = [
+  ['The Great Gatsby','F. Scott Fitzgerald','9780743273565','Fiction','1925','#233e5b','A summer on Long Island. A mysterious millionaire. A dream that shimmers just out of reach.'],
+  ['Nineteen Eighty-Four','George Orwell','9780451524935','Dystopian','1949','#a54638','In a world where every thought is watched, one man begins to question the truth.'],
+  ['Pride and Prejudice','Jane Austen','9780141439518','Romance','1813','#627765','First impressions, second chances, and the distance between what we assume and what we know.'],
+  ['To Kill a Mockingbird','Harper Lee','9780061120084','Fiction','1960','#79533f','A child’s view of a small town, and a story of courage, compassion, and justice.'],
+  ['The Catcher in the Rye','J. D. Salinger','9780316769488','Fiction','1951','#a83a31','A few restless days in New York with a narrator searching for something real.'],
+  ['The Hobbit','J. R. R. Tolkien','9780547928227','Fantasy','1937','#49737d','An unexpected visitor takes a reluctant hobbit far beyond the comforts of home.'],
+  ['Dune','Frank Herbert','9780441172719','Science fiction','1965','#be753a','On a desert planet, the fate of an empire rests on a resource more precious than water.'],
+  ['The Lord of the Flies','William Golding','9780140283334','Fiction','1954','#697842','An island without adults. A fragile order. The unsettling edges of human nature.'],
+  ['The Road','Cormac McCarthy','9780307387899','Fiction','2006','#55504b','A father and son follow a road through a ruined world, carrying their last light of hope.'],
+  ['Wuthering Heights','Emily Brontë','9780141439556','Gothic','1847','#5c6671','On the windswept Yorkshire moors, a fierce love echoes across generations.'],
+  ['Jane Eyre','Charlotte Brontë','9780142437209','Fiction','1847','#506658','An independent spirit finds her place in a world determined to make her smaller.'],
+  ['The Little Prince','Antoine de Saint-Exupéry','9780156012195','Fable','1943','#76829b','A visitor from a tiny planet asks the questions that grown-ups have forgotten to ask.'],
+  ['Brave New World','Aldous Huxley','9780060850524','Dystopian','1932','#387991','A perfectly organized society raises an imperfect question: what is the price of happiness?'],
+  ['The Metamorphosis','Franz Kafka','9780141187761','Fiction','1915','#938252','One impossible morning transforms an ordinary life into a strange, unforgettable fable.'],
+  ['The Odyssey','Homer','9780140268867','Epic','Ancient Greece','#775043','A long journey home, across dangerous seas and through the stories that made a world.'],
+  ['Crime and Punishment','Fyodor Dostoevsky','9780140449136','Fiction','1866','#8b6350','A young man tests an idea against reality, and discovers that the mind keeps its own account.'],
+  ['Frankenstein','Mary Shelley','9780141439471','Gothic','1818','#687563','An act of creation becomes a haunting question about responsibility and belonging.'],
+  ['Dracula','Bram Stoker','9780553213119','Gothic','1897','#773837','A distant castle, a voyage to England, and a darkness that refuses to stay in the past.'],
+  ['The Count of Monte Cristo','Alexandre Dumas','9780140449266','Adventure','1844','#657c78','A stolen future becomes a sweeping tale of escape, reinvention, and revenge.'],
+  ['A Room of One’s Own','Virginia Woolf','9780141439846','Essay','1929','#957853','A lasting meditation on creative freedom, independence, and the space to make something.'],
+  ['Don Quixote','Miguel de Cervantes','9780142437230','Adventure','1605','#a88752','A would-be knight and his practical companion set out to find a more enchanted world.'],
+  ['Mrs Dalloway','Virginia Woolf','9780141441146','Fiction','1925','#9b816e','One day in London unfolds into the rich, private worlds of the people passing through it.'],
+  ['A Tale of Two Cities','Charles Dickens','9780141439600','Historical','1859','#587481','Two cities and intertwined lives caught in the gathering force of revolution.'],
+  ['Sense and Sensibility','Jane Austen','9780141439662','Romance','1811','#93767b','Two sisters navigate love and uncertainty with very different ways of seeing the world.'],
+];
+export const books = collection.map(([title,author,isbn,genre,year,color,description],id) => ({id,title,author,isbn,genre,year,color,description,cover:`/covers/${isbn}.jpg`}));
+

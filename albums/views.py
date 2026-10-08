@@ -3,6 +3,7 @@ from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from .models import Album, PhotoAsset, AlbumPhoto,AlbumShare
+from .constants import PHOTO_FORMATS
 from .serializers import AlbumSerializer, PhotoUploadSerializer,PhotoReorderSerializer,AlbumPhotoSerializer,PhotoCopySerializer,BulkPhotoUploadSerializer,SharedPhotoCopySerializer,ShareCreateSerializer,AlbumPhotoEditSerializer
 from rest_framework.views import APIView
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -11,7 +12,8 @@ import uuid
 from django.db import transaction
 import logging
 from rest_framework.response import Response
-from django.db.models import Max
+from django.db.models import Max, Count, Q
+from django.db.models import Prefetch
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import JSONParser
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -19,8 +21,27 @@ import secrets
 from django.utils import timezone
 from django.urls import reverse
 import hashlib
+from django.core import signing
+from django.http import FileResponse, Http404
 # Create your views here.
 logger = logging.getLogger(__name__)
+
+class AlbumPhotoMediaView(APIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request, token):
+        try:
+            asset_id = signing.loads(token, salt='album-photo', max_age=3600)
+            asset = PhotoAsset.objects.get(pk=asset_id)
+            if not AlbumPhoto.objects.filter(asset=asset, is_deleted=False, album__is_deleted=False).exists():
+                raise Http404
+            response = FileResponse(asset.file.open('rb'), content_type=asset.content_type)
+            response['Cache-Control'] = 'private, no-store'
+            response['X-Content-Type-Options'] = 'nosniff'
+            return response
+        except (signing.BadSignature, signing.SignatureExpired, PhotoAsset.DoesNotExist, ValueError, OSError):
+            raise Http404
 
 def hash_share_token(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -30,7 +51,9 @@ class AlbumListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-        return Album.objects.filter(owner=self.request.user)
+        return (Album.objects.filter(owner=self.request.user, is_deleted=False)
+                .annotate(photo_count=Count('photos', filter=Q(photos__is_deleted=False)))
+                .prefetch_related(Prefetch('photos', queryset=AlbumPhoto.objects.filter(is_deleted=False).select_related('asset').order_by('position', 'id'), to_attr='active_photos')))
     
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
@@ -40,7 +63,7 @@ class PhotoUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     
     def post(self, request, album_id):
-        get_object_or_404(Album,pk=album_id,owner=request.user)
+        get_object_or_404(Album,pk=album_id,owner=request.user,is_deleted=False)
         serializer = PhotoUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
@@ -49,14 +72,7 @@ class PhotoUploadView(APIView):
         
         width, height = photo.image.size
         
-        formats={
-            "JPEG": ("jpg", "image/jpeg"),
-            "PNG": ("png", "image/png"),
-            "WEBP": ("webp", "image/webp"),
-            
-        }
-        
-        extension, content_type = formats[photo.image.format]
+        extension, content_type = PHOTO_FORMATS[photo.image.format]
         asset = PhotoAsset(
             filename=photo.name,
             content_type=content_type,
@@ -69,8 +85,8 @@ class PhotoUploadView(APIView):
         
         try:
             with transaction.atomic():
-                album=get_object_or_404(Album.objects.select_for_update(),pk=album_id,owner=request.user)
-                last_position=album.photos.aggregate(last=Max('position'))['last']
+                album=get_object_or_404(Album.objects.select_for_update(),pk=album_id,owner=request.user,is_deleted=False)
+                last_position=album.photos.filter(is_deleted=False).aggregate(last=Max('position'))['last']
                 position=(0 if last_position is None else last_position+1)
                 photo.seek(0)
                 asset.file.save(
@@ -115,9 +131,9 @@ class AlbumPhotoListView(generics.ListAPIView):
     pagination_class = AlbumPhotoPagination
     
     def get_queryset(self):
-        album = get_object_or_404(Album, pk=self.kwargs['album_id'], owner=self.request.user)
+        album = get_object_or_404(Album, pk=self.kwargs['album_id'], owner=self.request.user, is_deleted=False)
         return (
-            AlbumPhoto.objects.filter(album=album,asset__isnull=False)
+            AlbumPhoto.objects.filter(album=album,asset__isnull=False,is_deleted=False)
             .select_related('asset')
             .order_by('position', 'id')
         )
@@ -138,14 +154,14 @@ class PhotoCopyView(APIView):
 
         
         with transaction.atomic():
-            destination=get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user)
-            source=get_object_or_404(Album.objects.select_for_update(), pk=source_id, owner=request.user)
-            selected=AlbumPhoto.objects.filter(album=source, id__in=photo_ids).select_related('asset')
+            destination=get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user, is_deleted=False)
+            source=get_object_or_404(Album.objects.select_for_update(), pk=source_id, owner=request.user, is_deleted=False)
+            selected=AlbumPhoto.objects.filter(album=source, id__in=photo_ids, is_deleted=False).select_related('asset')
             if len(selected) != len(photo_ids):
                 raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the source album."]})
             
-            existing_assests=set(destination.photos.values_list('asset_id', flat=True))
-            last=destination.photos.aggregate(last=Max('position'))['last']
+            existing_assests=set(destination.photos.filter(is_deleted=False).values_list('asset_id', flat=True))
+            last=destination.photos.filter(is_deleted=False).aggregate(last=Max('position'))['last']
             position=(0 if last is None else last+1)
             
             copied_ids=[]
@@ -155,6 +171,17 @@ class PhotoCopyView(APIView):
             for photo in selected:
                 if photo.asset_id in existing_assests:
                     skipped+=1
+                    continue
+
+                deleted_copy = destination.photos.filter(asset_id=photo.asset_id, is_deleted=True).first()
+                if deleted_copy:
+                    deleted_copy.is_deleted = False
+                    deleted_copy.deleted_at = None
+                    deleted_copy.position = position
+                    deleted_copy.save(update_fields=['is_deleted', 'deleted_at', 'position'])
+                    copied_ids.append(str(deleted_copy.pk))
+                    existing_assests.add(photo.asset_id)
+                    position += 1
                     continue
                 
                 copy=AlbumPhoto.objects.create(
@@ -179,7 +206,7 @@ class BulkPhotoUploadView(APIView):
     parser_classes = [MultiPartParser]
 
     def post(self, request, album_id):
-        get_object_or_404(Album, pk=album_id, owner=request.user)
+        get_object_or_404(Album, pk=album_id, owner=request.user, is_deleted=False)
         serializer = BulkPhotoUploadSerializer(data={
             'photos': request.FILES.getlist('photos'),
             'caption': request.data.get('caption', '')
@@ -188,23 +215,14 @@ class BulkPhotoUploadView(APIView):
 
         photos = serializer.validated_data['photos']
         caption = serializer.validated_data['caption']
-        formats = {
-                                "JPEG": ("jpg", "image/jpeg"),
-                                "PNG": ("png", "image/png"),
-                                "WEBP": ("webp", "image/webp"),
-                            }
+        formats = PHOTO_FORMATS
         
 
         uploaded_files = []
         skipped_photos = 0
-        total_size = sum(photo.size for photo in photos)
-
-        if total_size > 100 * 1024 * 1024:
-            return Response({"detail": "Total size of all photos exceeds the maximum limit of 100MB."}, status=400)
-
         with transaction.atomic():
-            album = get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user)
-            last_position = album.photos.aggregate(last=Max('position'))['last']
+            album = get_object_or_404(Album.objects.select_for_update(), pk=album_id, owner=request.user, is_deleted=False)
+            last_position = album.photos.filter(is_deleted=False).aggregate(last=Max('position'))['last']
             position = (0 if last_position is None else last_position + 1)
 
             for photo in photos:
@@ -253,7 +271,7 @@ class ShareCreateView(APIView):
     parser_classes=[JSONParser]
     
     def post(self, request, album_id):
-        album=get_object_or_404(Album, pk=album_id, owner=request.user)
+        album=get_object_or_404(Album, pk=album_id, owner=request.user, is_deleted=False)
         serializer=ShareCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token=secrets.token_urlsafe(32)
@@ -295,6 +313,7 @@ class SharedAlbumPhotoListView(generics.ListAPIView):
             token_hash=token_hash,
             revoked_at__isnull=True,
             expires_at__gt=timezone.now(),
+            album__is_deleted=False,
         )
 
         return (
@@ -302,6 +321,7 @@ class SharedAlbumPhotoListView(generics.ListAPIView):
             .filter(
                 album_id=self.share.album_id,
                 asset__isnull=False,
+                is_deleted=False,
             )
             .select_related("asset")
             .order_by("position", "id")
@@ -325,7 +345,7 @@ class ShareRevokeView(APIView):
     permission_classes=[IsAuthenticated]
     
     def delete(self,request,album_id,share_id):
-        share=get_object_or_404(AlbumShare,pk=share_id,album_id=album_id,album__owner=request.user)
+        share=get_object_or_404(AlbumShare,pk=share_id,album_id=album_id,album__owner=request.user,album__is_deleted=False)
         if share.revoked_at is None:
             share.revoked_at=timezone.now()
             share.save(update_fields=["revoked_at"])
@@ -344,12 +364,12 @@ class SharedPhotoCopyView(generics.ListAPIView):
         photo_ids=serializer.validated_data['photo_ids']
         
         with transaction.atomic():
-            share=get_object_or_404(AlbumShare.objects.select_for_update(),token_hash=hash_share_token(token),revoked_at__isnull=True,expires_at__gt=timezone.now())
+            share=get_object_or_404(AlbumShare.objects.select_for_update(),token_hash=hash_share_token(token),revoked_at__isnull=True,expires_at__gt=timezone.now(),album__is_deleted=False)
             
             if not share.can_copy:
                 raise PermissionDenied("This share does not allow copying.")
             
-            destination=get_object_or_404(Album.objects.select_for_update(),pk=destination_id,owner=request.user)
+            destination=get_object_or_404(Album.objects.select_for_update(),pk=destination_id,owner=request.user,is_deleted=False)
             
             if share.expires_at<timezone.now():
                 raise PermissionDenied("This share has expired.")
@@ -357,16 +377,16 @@ class SharedPhotoCopyView(generics.ListAPIView):
             if share.album_id==destination_id:
                 raise PermissionDenied("Source and destination albums cannot be the same.")
             
-            selected=AlbumPhoto.objects.filter(album_id=share.album,pk__in=photo_ids,asset__isnull=False).order_by('position','id')
+            selected=AlbumPhoto.objects.filter(album_id=share.album,pk__in=photo_ids,asset__isnull=False,is_deleted=False).order_by('position','id')
             
             if len(selected)!=len(photo_ids):
                 raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the source album."]})
             
             asset_ids = {photo.asset_id for photo in selected}
             
-            existing_assets=set(destination.photos.filter(asset_id__in=asset_ids).values_list('asset_id', flat=True))
+            existing_assets=set(destination.photos.filter(asset_id__in=asset_ids,is_deleted=False).values_list('asset_id', flat=True))
              
-            last=destination.photos.aggregate(last=Max('position'))['last']
+            last=destination.photos.filter(is_deleted=False).aggregate(last=Max('position'))['last']
             
             position=(0 if last is None else last+1)
             copied_ids=[]
@@ -374,6 +394,17 @@ class SharedPhotoCopyView(generics.ListAPIView):
             for photo in selected:
                 if photo.asset_id in existing_assets:
                     skipped+=1
+                    continue
+
+                deleted_copy = destination.photos.filter(asset_id=photo.asset_id, is_deleted=True).first()
+                if deleted_copy:
+                    deleted_copy.is_deleted = False
+                    deleted_copy.deleted_at = None
+                    deleted_copy.position = position
+                    deleted_copy.save(update_fields=['is_deleted', 'deleted_at', 'position'])
+                    copied_ids.append(str(deleted_copy.pk))
+                    existing_assets.add(photo.asset_id)
+                    position += 1
                     continue
                 
                 copy=AlbumPhoto.objects.create(
@@ -413,6 +444,7 @@ class AlbumDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return Album.objects.filter(
             owner=self.request.user,
+            is_deleted=False,
         )
 
     def perform_destroy(self, instance):
@@ -422,7 +454,9 @@ class AlbumDetailView(generics.RetrieveUpdateDestroyAPIView):
                 pk=instance.pk,
             )
 
-            album.delete()
+            album.is_deleted = True
+            album.deleted_at = timezone.now()
+            album.save(update_fields=['is_deleted', 'deleted_at'])
     
 class AlbumPhotoDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class=AlbumPhotoEditSerializer
@@ -435,20 +469,23 @@ class AlbumPhotoDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return AlbumPhoto.objects.filter(
             album_id=self.kwargs['album_id'],
-            album__owner=self.request.user
+            album__owner=self.request.user,
+            album__is_deleted=False,
+            is_deleted=False,
         )
     def perform_destroy(self, instance):
         with transaction.atomic():
-                get_object_or_404(
+            get_object_or_404(
                 Album.objects.select_for_update(),
                 pk=instance.album_id,
                 owner=self.request.user,
+                is_deleted=False,
             )
-
-        AlbumPhoto.objects.filter(
+            AlbumPhoto.objects.filter(
                 pk=instance.pk,
                 album_id=instance.album_id,
-            ).delete()
+                is_deleted=False,
+            ).update(is_deleted=True, deleted_at=timezone.now())
         
 class PhotoReorderView(APIView):
     permission_classes=[IsAuthenticated]
@@ -461,8 +498,8 @@ class PhotoReorderView(APIView):
         photo_ids=serializer.validated_data['photo_ids']
         
         with transaction.atomic():
-            album = get_object_or_404(Album, pk=album_id, owner=request.user)
-            photos_by_id = {photo.pk: photo for photo in album.photos.filter(asset__isnull=False).only('id','position')}
+            album = get_object_or_404(Album, pk=album_id, owner=request.user, is_deleted=False)
+            photos_by_id = {photo.pk: photo for photo in album.photos.filter(asset__isnull=False,is_deleted=False).only('id','position')}
             
             if(set(photo_ids)!=set(photos_by_id)):
                 raise ValidationError({"photo_ids": ["One or more photo IDs do not exist in the album."]})

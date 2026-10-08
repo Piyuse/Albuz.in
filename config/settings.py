@@ -26,6 +26,7 @@ GOOGLE_REDIRECT_URI = os.getenv(
     "GOOGLE_REDIRECT_URI",
     "http://127.0.0.1:8000/api/integrations/google/callback/",
 )
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://127.0.0.1:5173').rstrip('/')
 
 GOOGLE_DRIVE_SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -39,12 +40,29 @@ GOOGLE_TOKEN_ENCRYPTION_KEY = os.getenv(
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-g2k7j*1_gkm@u012^ad1&h-x+1v4u#vv#%p7y)61n-6m_mm!4u'
+DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() == 'true'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'local-development-only-change-me' if DEBUG else '')
+if not SECRET_KEY:
+    raise RuntimeError('Set DJANGO_SECRET_KEY when DJANGO_DEBUG is false.')
+if not DEBUG:
+    for required in ('DJANGO_ALLOWED_HOSTS', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST', 'S3_BUCKET', 'S3_REGION'):
+        if not os.getenv(required):
+            raise RuntimeError(f'Set {required} for production.')
+    if not FRONTEND_URL.startswith('https://'):
+        raise RuntimeError('Set FRONTEND_URL to the public HTTPS frontend origin.')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [host.strip() for host in os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if host.strip()]
+CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
+CORS_URLS_REGEX = r'^/api/'
+CORS_ALLOW_CREDENTIALS = False
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = not DEBUG
+SECURE_HSTS_SECONDS = 3600 if not DEBUG else 0
+if os.getenv('DJANGO_TRUST_PROXY_SSL_HEADER', 'false').lower() == 'true':
+    # Enable only when the hosting proxy overwrites X-Forwarded-Proto.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
@@ -56,6 +74,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'corsheaders',
     'rest_framework',
     "accounts",
     "albums",
@@ -64,15 +83,7 @@ INSTALLED_APPS = [
 
 STORAGES = {
     "default": {
-        "BACKEND": "storages.backends.s3.S3Storage",
-        "OPTIONS": {
-            "bucket_name": os.environ["S3_BUCKET"],
-            "region_name": os.environ["S3_REGION"],
-            "default_acl": None,
-            "file_overwrite": False,
-            "querystring_auth": True,
-            "querystring_expire": 60,
-        },
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
         "BACKEND": (
@@ -80,6 +91,20 @@ STORAGES = {
         ),
     },
 }
+if os.getenv('S3_BUCKET'):
+    STORAGES['default'] = {
+        'BACKEND': 'storages.backends.s3.S3Storage',
+        'OPTIONS': {
+            'bucket_name': os.environ['S3_BUCKET'],
+            'region_name': os.environ['S3_REGION'],
+            'default_acl': None,
+            'file_overwrite': False,
+            'querystring_auth': True,
+            'querystring_expire': 3600,
+        },
+    }
+MEDIA_ROOT = BASE_DIR / 'private-media'
+MEDIA_URL = '/media/'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
@@ -96,6 +121,8 @@ SIMPLE_JWT = {
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -130,7 +157,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    "default": {
+    "default": ({
         "ENGINE": "django.db.backends.mysql",
         "NAME": os.environ["DB_NAME"],
         "USER": os.environ["DB_USER"],
@@ -143,7 +170,10 @@ DATABASES = {
                 "SET sql_mode='STRICT_TRANS_TABLES'"
             ),
         },
-    }
+    } if os.getenv('DB_NAME') else {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': os.getenv('SQLITE_DB_PATH', BASE_DIR / 'db.sqlite3'),
+    })
 }
 
 # Password validation
@@ -180,7 +210,9 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [BASE_DIR / 'frontend' / 'dist'] if (BASE_DIR / 'frontend' / 'dist').exists() else []
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

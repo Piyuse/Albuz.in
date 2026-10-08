@@ -1,9 +1,13 @@
 import hashlib
 import json
+import logging
 import secrets
 from datetime import timedelta
+from urllib.parse import urlsplit, urlunsplit
 
 from django.conf import settings
+from django.http import HttpResponseRedirect
+from django.http import Http404
 from django.db import transaction
 from django.utils import timezone
 
@@ -14,6 +18,7 @@ from rest_framework.views import APIView
 
 from integrations.google_drive import apply_resource_key, get_drive_service
 from integrations.serializers import DriveFolderListSerializer
+from albums.models import Album, AlbumPhoto
 
 from .crypto import encrypt_json
 from .google_oauth import build_google_flow
@@ -29,20 +34,36 @@ from requests.exceptions import RequestException
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
-GOOGLE_OAUTH_COOKIE = "google_oauth_browser"
 GOOGLE_OAUTH_TTL_SECONDS = 600
+logger = logging.getLogger(__name__)
 
 
 def hash_oauth_value(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def allowed_frontend_origins():
+    configured = urlsplit(settings.FRONTEND_URL)
+    origins = {urlunsplit((configured.scheme, configured.netloc, "", "", ""))}
+    if configured.hostname in {"localhost", "127.0.0.1"}:
+        alternate = "localhost" if configured.hostname == "127.0.0.1" else "127.0.0.1"
+        if configured.port:
+            alternate += f":{configured.port}"
+        origins.add(urlunsplit((configured.scheme, alternate, "", "", "")))
+    return origins
+
+
 class GoogleConnectStartView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        return_origin = request.data.get("return_origin") or request.headers.get("Origin") or settings.FRONTEND_URL
+        if return_origin not in allowed_frontend_origins():
+            raise ValidationError({
+                "detail": "The application address is not an allowed Google connection return address."
+            })
+
         state = secrets.token_urlsafe(32)
-        browser_nonce = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(64)
 
         flow = build_google_flow(
@@ -62,9 +83,9 @@ class GoogleConnectStartView(APIView):
         GoogleOAuthState.objects.create(
             state_hash=hash_oauth_value(returned_state),
             user=request.user,
-            browser_nonce_hash=hash_oauth_value(browser_nonce),
             code_verifier_encrypted=encrypt_json({
                 "code_verifier": code_verifier,
+                "return_origin": return_origin,
             }),
             expires_at=expires_at,
         )
@@ -74,16 +95,6 @@ class GoogleConnectStartView(APIView):
             "expires_at": expires_at,
         })
 
-        response.set_cookie(
-            key=GOOGLE_OAUTH_COOKIE,
-            value=browser_nonce,
-            max_age=GOOGLE_OAUTH_TTL_SECONDS,
-            httponly=True,
-            secure=not settings.DEBUG,
-            samesite="Lax",
-            path="/api/integrations/google/",
-        )
-
         response["Cache-Control"] = "no-store"
         return response
     
@@ -92,21 +103,20 @@ class GoogleCallbackView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        self.oauth_return_url = settings.FRONTEND_URL
         state = request.query_params.get("state", "")
-        browser_nonce = request.COOKIES.get(
-            "google_oauth_browser", ""
-        )
 
-        if not state or not browser_nonce:
+        if not state:
+            self.oauth_error_reason = "expired"
             raise ValidationError({
-                "detail": (
-                    "Start the Google connection again "
-                    "in the same browser."
-                )
+                "detail": "Start a new Google connection."
             })
 
-        # Validate and consume the OAuth attempt.
+        # The one-time state binds the callback to a user and the stored PKCE verifier.
+        # A browser cookie is unnecessary because Google may return to a different
+        # loopback host from the one serving the frontend.
         with transaction.atomic():
+            self.oauth_error_reason = "expired"
             attempt = get_object_or_404(
                 GoogleOAuthState.objects.select_for_update(),
                 state_hash=hash_oauth_value(state),
@@ -119,26 +129,20 @@ class GoogleCallbackView(APIView):
                     "detail": "This connection attempt expired."
                 })
 
-            if not secrets.compare_digest(
-                attempt.browser_nonce_hash,
-                hash_oauth_value(browser_nonce),
-            ):
-                raise PermissionDenied(
-                    "The Google connection browser does not match."
-                )
+            verifier_data = decrypt_json(attempt.code_verifier_encrypted)
+            return_origin = verifier_data.get("return_origin")
+            if return_origin in allowed_frontend_origins():
+                self.oauth_return_url = return_origin
 
             attempt.used_at = timezone.now()
             attempt.save(update_fields=["used_at"])
 
-            # These variables are defined inside get().
             user_id = attempt.user_id
-            verifier_encrypted = attempt.code_verifier_encrypted
-
-        self.clear_oauth_cookie = True
 
         code = request.query_params.get("code")
 
         if request.query_params.get("error") or not code:
+            self.oauth_error_reason = "denied"
             raise ValidationError({
                 "detail": (
                     "Google authorization was not completed. "
@@ -146,33 +150,27 @@ class GoogleCallbackView(APIView):
                 )
             })
 
-        verifier_data = decrypt_json(verifier_encrypted)
-
         flow = build_google_flow(
             state=state,
             code_verifier=verifier_data["code_verifier"],
         )
 
         try:
+            self.oauth_error_reason = "exchange"
             flow.fetch_token(code=code, timeout=20)
             credentials = flow.credentials
 
         except (OAuth2Error, RequestException, ValueError, Warning):
-            return Response(
-                {
-                    "detail": (
-                        "Google authorization could not be completed. "
-                        "Check your OAuth configuration and start again."
-                    )
-                },
-                status=502,
-            )
+            raise ValidationError({
+                "detail": "Google authorization could not be completed. Start a new connection."
+            })
 
         granted_scopes = credentials.granted_scopes
 
         if granted_scopes is None:
             granted_scopes = credentials.scopes
 
+        self.oauth_error_reason = "permission"
         if not set(settings.GOOGLE_DRIVE_SCOPES).issubset(
             set(granted_scopes or [])
         ):
@@ -221,7 +219,15 @@ class GoogleCallbackView(APIView):
                 },
             )
 
-        return Response({"connected": True})
+        return HttpResponseRedirect(f'{self.oauth_return_url}/?google=connected')
+
+    def handle_exception(self, exc):
+        if not isinstance(exc, (ValidationError, PermissionDenied, NotFound, Http404)):
+            logger.exception("Google OAuth callback failed")
+        reason = getattr(self, "oauth_error_reason", "failed")
+        return HttpResponseRedirect(
+            f'{getattr(self, "oauth_return_url", settings.FRONTEND_URL)}/?google=error&reason={reason}'
+        )
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(
@@ -230,13 +236,6 @@ class GoogleCallbackView(APIView):
 
         response["Cache-Control"] = "no-store"
         response["Referrer-Policy"] = "no-referrer"
-
-        if getattr(self, "clear_oauth_cookie", False):
-            response.delete_cookie(
-                "google_oauth_browser",
-                path="/api/integrations/google/",
-                samesite="Lax",
-            )
 
         return response
     
@@ -248,7 +247,9 @@ class GoogleDriveFolderListView(APIView):
         serializer.is_valid(raise_exception=True)
         
         folder=serializer.validated_data['folder_link']
-        page_token=serializer.validated_data['page_token']
+        page_token=serializer.validated_data.get('page_token', '')
+        album_id=serializer.validated_data.get('album_id')
+        album = get_object_or_404(Album, pk=album_id, owner=request.user, is_deleted=False) if album_id else None
         service=None
         
         try:
@@ -266,6 +267,8 @@ class GoogleDriveFolderListView(APIView):
                 f"'{folder['folder_id']}' in parents "
                 "and trashed = false "
                 "and (mimeType = 'image/jpeg' "
+                "or mimeType = 'image/jpg' "
+                "or mimeType = 'image/pjpeg' "
                 "or mimeType = 'image/png' "
                 "or mimeType = 'image/webp')"
             )
@@ -279,7 +282,7 @@ class GoogleDriveFolderListView(APIView):
                 "includeItemsFromAllDrives": True,
                 "fields": (
                     "nextPageToken,"
-                    "files(id,name,mimeType,size,resourceKey,"
+                    "files(id,name,mimeType,size,thumbnailLink,resourceKey,"
                     "capabilities(canDownload))"
                 ),
                 "corpora": "user",
@@ -294,12 +297,24 @@ class GoogleDriveFolderListView(APIView):
                 list_request, folder
             ).execute()
 
+            files = result.get("files", [])
+            if album is not None:
+                imported_ids = set(
+                    AlbumPhoto.objects.filter(
+                        album=album,
+                        is_deleted=False,
+                        source_drive_file_id__in=[file["id"] for file in files],
+                    ).values_list("source_drive_file_id", flat=True)
+                )
+                for file in files:
+                    file["already_imported"] = file["id"] in imported_ids
+
             response = Response({
                 "folder": {
                     "id": metadata["id"],
                     "name": metadata["name"],
                 },
-                "files": result.get("files", []),
+                "files": files,
                 "next_page_token": result.get("nextPageToken"),
             })
             response["Cache-Control"] = "no-store"
@@ -357,4 +372,3 @@ class GoogleDriveFolderListView(APIView):
 
             
 
-        

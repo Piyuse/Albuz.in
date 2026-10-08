@@ -1,7 +1,7 @@
-import io
 import re
+from tempfile import SpooledTemporaryFile
 
-from django.core.files.uploadedfile import InMemoryUploadedFile
+from django.core.files.uploadedfile import UploadedFile
 from googleapiclient.http import MediaIoBaseDownload
 from rest_framework.exceptions import (
     PermissionDenied,
@@ -10,7 +10,7 @@ from rest_framework.exceptions import (
 
 from albums.serializers import PhotoUploadSerializer
 
-from albums.constants import MAX_PHOTO_BYTES
+from albums.constants import MAX_PHOTO_BYTES, MAX_PHOTO_MIB, PHOTO_FORMATS
 
 IMAGE_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -18,14 +18,22 @@ IMAGE_EXTENSIONS = {
     "image/webp": ".webp",
 }
 
+DRIVE_MIME_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+}
 
-class LimitedPhotoBuffer(io.BytesIO):
-    """Prevent downloaded images from exceeding the size limit."""
+
+class LimitedPhotoBuffer(SpooledTemporaryFile):
+    """Spool large Drive downloads to disk while enforcing the file limit."""
+
+    def __init__(self):
+        super().__init__(max_size=8 * 1024 * 1024, mode="w+b")
 
     def write(self, data):
         if self.tell() + len(data) > MAX_PHOTO_BYTES:
             raise ValidationError({
-                "photo": "The downloaded image exceeds 10 MB."
+                "photo": f"The downloaded image exceeds {MAX_PHOTO_MIB} MB."
             })
 
         return super().write(data)
@@ -120,18 +128,20 @@ def download_drive_photo(
             "Google does not allow downloading this photo."
         )
 
-    mime_type = metadata.get("mimeType")
+    mime_type = DRIVE_MIME_ALIASES.get(
+        metadata.get("mimeType"), metadata.get("mimeType")
+    )
 
     if mime_type not in IMAGE_EXTENSIONS:
         raise ValidationError({
             "photo": (
-                "Only JPEG, PNG, and WebP images are supported."
+                "Only JPG, PNG, and WebP images are supported."
             )
         })
 
     if int(metadata.get("size", 0)) > MAX_PHOTO_BYTES:
         raise ValidationError({
-            "photo": "The selected image exceeds 10 MB."
+            "photo": f"The selected image exceeds {MAX_PHOTO_MIB} MB."
         })
 
     resource_key = metadata.get("resourceKey") or resource_key
@@ -152,7 +162,7 @@ def download_drive_photo(
     buffer = LimitedPhotoBuffer()
 
     try:
-        # Download into memory in 1 MB chunks.
+        # Download in 1 MB chunks; files larger than 8 MB spill to disk.
         downloader = MediaIoBaseDownload(
             buffer,
             download_request,
@@ -167,10 +177,9 @@ def download_drive_photo(
         downloaded_size = buffer.tell()
         buffer.seek(0)
 
-        # Wrap the bytes as a Django uploaded file.
-        photo = InMemoryUploadedFile(
+        # Wrap the disk-backed stream as a Django uploaded file.
+        photo = UploadedFile(
             file=buffer,
-            field_name="photo",
             name=f"drive-photo{IMAGE_EXTENSIONS[mime_type]}",
             content_type=mime_type,
             size=downloaded_size,
@@ -186,20 +195,23 @@ def download_drive_photo(
 
         validated_photo = serializer.validated_data["photo"]
 
-        if validated_photo.content_type != mime_type:
-            raise ValidationError({
-                "photo": (
-                    "The image contents do not match "
-                    "the file type reported by Google."
-                )
-            })
+        # Pillow has verified the bytes, so its detected type takes precedence
+        # over Drive metadata. MPO has a primary JPEG image.
+        extension, detected_mime_type = PHOTO_FORMATS[validated_photo.image.format]
+        validated_photo.content_type = detected_mime_type
+        validated_photo.name = f"drive-photo.{extension}"
+
+        filename = metadata["name"][:255]
+        if detected_mime_type != mime_type:
+            stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+            filename = f"{stem[:250]}.{extension}"
 
         # Reset the pointer so a later S3 upload reads from the start.
         validated_photo.seek(0)
 
         return {
             "photo": validated_photo,
-            "filename": metadata["name"][:255],
+            "filename": filename,
             "width": validated_photo.image.width,
             "height": validated_photo.image.height,
         }
