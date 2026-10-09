@@ -64,6 +64,26 @@ if os.getenv('DJANGO_TRUST_PROXY_SSL_HEADER', 'false').lower() == 'true':
     # Enable only when the hosting proxy overwrites X-Forwarded-Proto.
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
+# Render captures stderr. Django's default production logger sends 5xx errors
+# to admin email instead, leaving the service logs without the traceback.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'request_errors': {
+            'class': 'logging.StreamHandler',
+            'level': 'ERROR',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['request_errors'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}
+
 
 # Application definition
 
