@@ -86,3 +86,56 @@ class OAuthReturnTests(APITestCase):
         )
         self.assertEqual(response.status_code, 400)
         build_flow.assert_not_called()
+
+    @override_settings(GOOGLE_TOKEN_ENCRYPTION_KEY="invalid-key")
+    @patch("integrations.views.logger")
+    @patch("integrations.views.build_google_flow")
+    def test_connect_reports_invalid_encryption_key_as_json(self, build_flow, logger):
+        user = get_user_model().objects.create_user(
+            username="oauth_invalid_key_test",
+            password="test-password-123",
+        )
+        self.client.force_authenticate(user=user)
+        build_flow.return_value.authorization_url.return_value = (
+            "https://accounts.google.com/test", "test-state"
+        )
+
+        response = self.client.post(
+            "/api/integrations/google/connect/",
+            {"return_origin": "http://127.0.0.1:5173"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.data["detail"],
+            "Google Drive encryption setup failed on the server.",
+        )
+        logger.exception.assert_called_once()
+
+    @patch("integrations.views.logger")
+    @patch("integrations.views.GoogleOAuthState.objects.create")
+    @patch("integrations.views.build_google_flow")
+    def test_connect_reports_state_save_failure_as_json(self, build_flow, create, logger):
+        user = get_user_model().objects.create_user(
+            username="oauth_state_save_test",
+            password="test-password-123",
+        )
+        self.client.force_authenticate(user=user)
+        build_flow.return_value.authorization_url.return_value = (
+            "https://accounts.google.com/test", "test-state"
+        )
+        create.side_effect = RuntimeError("database unavailable")
+
+        response = self.client.post(
+            "/api/integrations/google/connect/",
+            {"return_origin": "http://127.0.0.1:5173"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.data["detail"],
+            "Google Drive could not save the connection attempt.",
+        )
+        logger.exception.assert_called_once()

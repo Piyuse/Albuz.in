@@ -20,12 +20,11 @@ from integrations.google_drive import apply_resource_key, get_drive_service
 from integrations.serializers import DriveFolderListSerializer
 from albums.models import Album, AlbumPhoto
 
-from .crypto import encrypt_json
 from .google_oauth import build_google_flow
 from .models import GoogleDriveConnection, GoogleOAuthState
 from django.shortcuts import get_object_or_404
 
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from .crypto import decrypt_json, encrypt_json
 
 from oauthlib.oauth2 import OAuth2Error
@@ -36,6 +35,11 @@ from googleapiclient.errors import HttpError
 
 GOOGLE_OAUTH_TTL_SECONDS = 600
 logger = logging.getLogger(__name__)
+
+
+class GoogleConnectSetupError(APIException):
+    status_code = 503
+    default_code = "google_connect_unavailable"
 
 
 def hash_oauth_value(value):
@@ -66,29 +70,48 @@ class GoogleConnectStartView(APIView):
         state = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(64)
 
-        flow = build_google_flow(
-            state=state,
-            code_verifier=code_verifier,
-        )
-
-        authorization_url, returned_state = flow.authorization_url(
-            access_type="offline",
-            prompt="consent",
-        )
+        try:
+            flow = build_google_flow(
+                state=state,
+                code_verifier=code_verifier,
+            )
+            authorization_url, returned_state = flow.authorization_url(
+                access_type="offline",
+                prompt="consent",
+            )
+        except Exception:
+            logger.exception("Google connection failed during authorization setup")
+            raise GoogleConnectSetupError(
+                "Google Drive authorization setup failed on the server."
+            )
 
         expires_at = timezone.now() + timedelta(
             seconds=GOOGLE_OAUTH_TTL_SECONDS
         )
 
-        GoogleOAuthState.objects.create(
-            state_hash=hash_oauth_value(returned_state),
-            user=request.user,
-            code_verifier_encrypted=encrypt_json({
+        try:
+            encrypted_verifier = encrypt_json({
                 "code_verifier": code_verifier,
                 "return_origin": return_origin,
-            }),
-            expires_at=expires_at,
-        )
+            })
+        except Exception:
+            logger.exception("Google connection failed while encrypting OAuth state")
+            raise GoogleConnectSetupError(
+                "Google Drive encryption setup failed on the server."
+            )
+
+        try:
+            GoogleOAuthState.objects.create(
+                state_hash=hash_oauth_value(returned_state),
+                user=request.user,
+                code_verifier_encrypted=encrypted_verifier,
+                expires_at=expires_at,
+            )
+        except Exception:
+            logger.exception("Google connection failed while saving OAuth state")
+            raise GoogleConnectSetupError(
+                "Google Drive could not save the connection attempt."
+            )
 
         response = Response({
             "authorization_url": authorization_url,
