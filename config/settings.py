@@ -133,12 +133,14 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
-    ]
+    ],
+    'DEFAULT_THROTTLE_RATES': {'login': '10/min'},
 }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    'UPDATE_LAST_LOGIN': True,
 }
 
 MIDDLEWARE = [
